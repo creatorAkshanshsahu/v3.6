@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>AKTV Shaka</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;font-family:Arial,sans-serif;overflow:hidden}video{width:100%;height:100%;object-fit:contain;background:#000}#status{position:absolute;left:5%;right:5%;bottom:5%;padding:14px 18px;background:rgba(0,0,0,.78);border:1px solid rgba(255,255,255,.15);border-radius:10px;font-size:16px;line-height:1.4;display:none}#spinner{position:absolute;left:50%;top:50%;width:42px;height:42px;margin:-21px;border:4px solid #333;border-top-color:#64d9ff;border-radius:50%;animation:spin .8s linear infinite}#spinner.off{display:none}@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+<!-- Shaka is loaded from its official CDN. The playback page itself is bundled in the APK and runs in GeckoView, not Android System WebView. -->
+<script src="https://cdn.jsdelivr.net/npm/shaka-player@4.15.18/dist/shaka-player.compiled.js"></script>
+</head>
+<body>
+<video id="video" autoplay playsinline></video><div id="spinner"></div><div id="status"></div>
+<script>
+(function(){
+'use strict';
+const API='https://livetgtv.lovable.app/api/public/channels/';
+const video=document.getElementById('video'), spinner=document.getElementById('spinner'), statusBox=document.getElementById('status');
+let player=null, attemptNo=0, refreshing=false, initialLoadComplete=false, recoveryUsed=false, currentChannel=(decodeURIComponent(location.hash.slice(1).split('&')[0])||'').trim();
+function setStatus(msg, error){
+  spinner.classList.toggle('off',!error && /READY/.test(msg));
+  statusBox.style.display=error?'block':'none'; statusBox.textContent=error?msg:'';
+  document.title=error?'AKTV_STATUS:ERROR:'+String(msg).replace(/[\r\n]/g,' ').slice(0,160):'AKTV_STATUS:'+msg;
+}
+function normalizeHex(v){return String(v||'').replace(/[^0-9a-f]/gi,'').toLowerCase();}
+async function fetchChannel(){
+ const r=await fetch(API+encodeURIComponent(currentChannel),{cache:'no-store',credentials:'omit'});
+ if(!r.ok) throw new Error('Channel API HTTP '+r.status);
+ const data=await r.json();
+ const sources=Array.isArray(data.sources)?data.sources.map(x=>typeof x==='string'?x:(x&&(x.url||x.src))||'').filter(x=>/^https?:\/\//i.test(x)):[];
+ if(!sources.length) throw new Error('API returned no playable sources');
+ return {data,sources};
+}
+function configureDrm(data){
+ const drm=data&&data.drm;
+ if(drm&&String(drm.type||'clearkey').toLowerCase()==='clearkey'&&drm.keyId&&drm.key){
+   const kid=normalizeHex(drm.keyId), key=normalizeHex(drm.key);
+   if(kid.length===32&&key.length===32) player.configure({drm:{clearKeys:{[kid]:key}}});
+   else throw new Error('Invalid ClearKey format from API');
+ } else player.configure({drm:{clearKeys:{}}});
+}
+function waitForPlaying(timeoutMs){
+ return new Promise((resolve,reject)=>{
+  let done=false;
+  const finish=(err)=>{if(done)return;done=true;clearTimeout(timer);video.removeEventListener('playing',onPlaying);player.removeEventListener('error',onError);err?reject(err):resolve();};
+  const onPlaying=()=>finish();
+  const onError=e=>finish(new Error('Shaka error '+(e.detail&&e.detail.code?e.detail.code:'unknown')));
+  const timer=setTimeout(()=>finish(new Error('Timed out waiting for video; check manifest/segment requests')),timeoutMs);
+  video.addEventListener('playing',onPlaying,{once:true}); player.addEventListener('error',onError);
+  video.play().catch(()=>{});
+ });
+}
+async function runCycle(allowRefresh){
+ attemptNo++;
+ setStatus('LOADING',false); spinner.classList.remove('off'); statusBox.style.display='none';
+ let fetched;
+ try{fetched=await fetchChannel();}catch(e){setStatus(e.message,true);return;}
+ configureDrm(fetched.data);
+ let lastErr=null;
+ for(let i=0;i<fetched.sources.length;i++){
+   const src=fetched.sources[i];
+   try{
+     await player.unload();
+     // Keep the signed URL byte-for-byte intact; do not strip or rebuild query parameters.
+     await player.load(src);
+     await waitForPlaying(18000);
+     setStatus('READY',false); initialLoadComplete=true;
+     // A later segment 403 can occur after the initial manifest successfully loads.
+     return;
+   }catch(e){lastErr=e; console.warn('Source failed',i,e);}
+ }
+ if(allowRefresh&&!refreshing){refreshing=true;try{await player.unload();await runCycle(false);return;}finally{refreshing=false;}}
+ setStatus((lastErr?lastErr.message:'All stream sources failed')+' (channel '+currentChannel+')',true);
+}
+async function init(){
+ try{
+   if(!window.shaka||!shaka.Player.isBrowserSupported()) throw new Error('Shaka is not supported by this TV playback engine');
+   shaka.polyfill.installAll();
+   player=new shaka.Player(); await player.attach(video);
+   player.configure({streaming:{retryParameters:{maxAttempts:3,baseDelay:500,backoffFactor:1.8,fuzzFactor:.5,timeout:20000,stallTimeout:12000,connectionTimeout:10000},bufferingGoal:18,rebufferingGoal:3,bufferBehind:20},manifest:{retryParameters:{maxAttempts:3,baseDelay:500,backoffFactor:1.8,timeout:15000}}});
+   player.addEventListener('error',e=>{const d=e.detail||{}; console.error('Shaka playback error',d.code,d.category,d.data); if(initialLoadComplete && !recoveryUsed && !refreshing){ recoveryUsed=true; initialLoadComplete=false; runCycle(false); } else if(initialLoadComplete){ setStatus('Playback error '+String(d.code||'unknown')+'; try reopening this channel',true); } });
+   await runCycle(true);
+ }catch(e){setStatus(e.message||String(e),true);}
+}
+window.addEventListener('unload',()=>{try{if(player)player.destroy();}catch(e){}});
+init();
+})();
+</script>
+</body></html>
