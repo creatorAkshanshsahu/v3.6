@@ -454,16 +454,15 @@ class MainActivity : AppCompatActivity() {
         val session = GeckoSession(GeckoSessionSettings.Builder()
             .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE).build())
-        session.contentDelegate = object : GeckoSession.ContentDelegate {
-            override fun onTitleChange(session: GeckoSession, title: String) {
+        // GeckoView 123 does not expose the title callback used by the previous build.
+        // Use the supported progress delegate to avoid the Kotlin "overrides nothing" error.
+        // Hide the initial loading spinner when the local Shaka page has finished loading;
+        // playback errors are still visible through the page's own player UI/logging.
+        session.progressDelegate = object : GeckoSession.ProgressDelegate {
+            override fun onPageStop(session: GeckoSession, success: Boolean) {
                 runOnUiThread {
-                    when {
-                        title.startsWith("AKTV_STATUS:READY") -> spinner.visibility = View.GONE
-                        title.startsWith("AKTV_STATUS:ERROR") -> {
-                            spinner.visibility = View.GONE
-                            val msg = title.removePrefix("AKTV_STATUS:ERROR:").take(160)
-                            if (layer.visibility == View.VISIBLE) Toast.makeText(this@MainActivity, "Shaka playback: $msg", Toast.LENGTH_LONG).show()
-                        }
+                    if (shakaSession === session && layer.visibility == View.VISIBLE) {
+                        spinner.visibility = View.GONE
                     }
                 }
             }
